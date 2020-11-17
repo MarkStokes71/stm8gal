@@ -62,6 +62,7 @@ typedef enum STM8gal_Bootloader_errors
     STM8GAL_BOOTLOADER_CANNOT_IDENTIFY_FAMILY,
     STM8GAL_BOOTLOADER_CANNOT_IDENTIFY_DEVICE,
     STM8GAL_BOOTLOADER_CANNOT_ALLOCATE_BUFFER,
+    STM8GAL_BOOTLOADER_VERIFICATION_FAILED,
     STM8GAL_BOOTLOADER_INCORRECT_GET_CODE,
     STM8GAL_BOOTLOADER_INCORRECT_READ_CODE,
     STM8GAL_BOOTLOADER_INCORRECT_GO_CODE,
@@ -72,6 +73,13 @@ typedef enum STM8gal_Bootloader_errors
     STM8GAL_BOOTLOADER_ADDRESS_END_GREATER_BUFFER,
     STM8GAL_BOOTLOADER_HEXFILE_ERROR,
 } STM8gal_BootloaderErrors_t;
+
+typedef struct Bootloader_VerificationInfo
+{
+    uint64_t    address;
+    uint8_t     deviceByte;
+    uint8_t     imageByte;
+} Bootloader_VerificationInfo_t;
 
 /// synchronize to microcontroller BSL
 STM8gal_BootloaderErrors_t bsl_sync(HANDLE ptrPort, uint8_t physInterface, uint8_t verbose);
@@ -108,6 +116,9 @@ STM8gal_BootloaderErrors_t Bootloader_GetLastError(void);
 
 /// return last error string in the Bootloader module
 const char * Bootloader_GetLastErrorString(void);
+
+/// get the last verification error information
+bool Bootloader_GetLastVerificationError(Bootloader_VerificationInfo_t *verificationError);
 
 #ifdef __cplusplus
 } // extern "C"

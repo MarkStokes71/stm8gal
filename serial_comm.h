@@ -26,6 +26,7 @@ extern "C"
 #include <stdlib.h>
 #include <stdint.h>
 #include <inttypes.h>
+#include <stdbool.h>
 
 /// physical bootloader interface 
 #if defined(USE_SPIDEV) && defined(USE_SPI_ARDUINO)
@@ -126,6 +127,11 @@ STM8gal_SerialErrors_t        SerialComm_GetLastError(void);
 
 /// return last error string in the Serial Comm module
 const char *                  SerialComm_GetLastErrorString(void);
+
+#if defined(WIN32) || defined(WIN64)
+///  Set the Serial Comms module to use the FTDI direct drivers (DLL)
+void                          SerialComm_UseFTDIDriver(bool newSetting);
+#endif
 
 #ifdef __cplusplus
 } // extern "C"

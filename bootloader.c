@@ -24,6 +24,7 @@
 #endif
 
 STM8gal_BootloaderErrors_t g_bootloaderLastError = STM8GAL_BOOTLOADER_NO_ERROR;
+Bootloader_VerificationInfo_t g_bootloaderLastVerificationError;
 
 char * g_bootloaderErrorStrings[STM8GAL_BOOTLOADER_HEXFILE_ERROR+1] = 
 { 
@@ -875,9 +876,9 @@ STM8gal_BootloaderErrors_t bsl_memRead(HANDLE ptrPort, uint8_t physInterface, ui
       }
       else if (verbose == CHATTY) {
         if (numBytes > 1024)
-          console_print(STDOUT, "%c  read %1.1fkB / %1.1fkB from 0x%" PRIx64 " to 0x%" PRIx64 " ", '\r', (float) countBytes/1024.0, (float) numBytes/1024.0, addrStart, addrStop);
+          console_print(STDOUT, "%c  read %1.1fkB / %1.1fkB from 0x%" PRIx64 " to 0x%" PRIx64 " ", '\r', (float) countBytes/1024.0, (float) numBytes/1024.0, addr, (addr + addrStep - 1));
         else
-          console_print(STDOUT, "%c  read %dB / %dB from 0x%" PRIx64 " to 0x%" PRIx64 " ", '\r', (int) countBytes, (int) numBytes, addrStart, addrStop);
+          console_print(STDOUT, "%c  read %dB / %dB from 0x%" PRIx64 " to 0x%" PRIx64 " ", '\r', (int) countBytes, (int) numBytes, addr, (addr + addrStep - 1));
       }
     }
 
@@ -2009,6 +2010,8 @@ STM8gal_BootloaderErrors_t bsl_memVerify(HANDLE ptrPort, uint8_t physInterface, 
   uint16_t  *tmpImageBuf;            // RAM image buffer (high byte != 0 indicates value is set)
 
   g_bootloaderLastError = STM8GAL_BOOTLOADER_NO_ERROR;
+  g_bootloaderLastVerificationError.deviceByte = 0;
+  g_bootloaderLastVerificationError.imageByte = 0;
 
   if (!(tmpImageBuf = malloc(LENIMAGEBUF * sizeof(*tmpImageBuf)))) {
     console_print(STDOUT, "Cannot allocate image buffer, try reducing LENIMAGEBUF");
@@ -2045,7 +2048,6 @@ STM8gal_BootloaderErrors_t bsl_memVerify(HANDLE ptrPort, uint8_t physInterface, 
 
   } // loop over image
 
-
   // print messgage
   if (verbose != MUTE)
     console_print(STDOUT, "  verify memory ... ");
@@ -2053,8 +2055,13 @@ STM8gal_BootloaderErrors_t bsl_memVerify(HANDLE ptrPort, uint8_t physInterface, 
   // compare defined data data entries (HB!=0x00)
   for (addr=addrStart; addr<=addrStop; addr++) {
     if (imageBuf[addr] & 0xFF00) {
-      if ((imageBuf[addr] & 0xFF) != (tmpImageBuf[addr] & 0xFF))
-        console_print(STDOUT, "verify failed at address 0x%" PRIx64 " (0x%02x vs 0x%02x)", addr, (uint8_t) (imageBuf[addr]&0xFF), (uint8_t) (tmpImageBuf[addr]&0xFF));
+      if ((imageBuf[addr] & 0xFF) != (tmpImageBuf[addr] & 0xFF)) {
+        console_print(STDOUT, "verify failed at address 0x%" PRIx64 " (x%02x vs 0x%02x)", addr, (uint8_t) (imageBuf[addr]&0xFF), (uint8_t) (tmpImageBuf[addr]&0xFF));
+        g_bootloaderLastVerificationError.address = addr;
+        g_bootloaderLastVerificationError.deviceByte = (uint8_t) (tmpImageBuf[addr]&0xFF);
+        g_bootloaderLastVerificationError.imageByte = (uint8_t) (imageBuf[addr]&0xFF);
+        g_bootloaderLastError = STM8GAL_BOOTLOADER_VERIFICATION_FAILED;
+      }
     } // if data defined
   } // loop over address
 
@@ -2275,10 +2282,27 @@ STM8gal_BootloaderErrors_t Bootloader_GetLastError(void) {
    
   return last error string in the Bootloader module
 */
-const char * Bootloader_GetLastErrorString(void)
-{
+const char * Bootloader_GetLastErrorString(void) {
     return(g_bootloaderErrorStrings[Bootloader_GetLastError()]);
 }
 
+/**
+  \fn const char * Bootloader_GetLastVerificationError(void)
+   
+  \return true for a verification error has occurred.  False one has not
+
+  get the last verification error information
+*/
+bool Bootloader_GetLastVerificationError(Bootloader_VerificationInfo_t *verificationError) {
+  
+  bool returnVal = false;
+
+  // if the bytes are the same, then there was no error on the last verification
+  if ( g_bootloaderLastVerificationError.deviceByte != g_bootloaderLastVerificationError.imageByte ) {
+    *verificationError = g_bootloaderLastVerificationError;
+    returnVal = true;
+  }
+  return(returnVal);
+}
 
 // end of file

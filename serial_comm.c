@@ -16,11 +16,29 @@
 #include "serial_comm.h"
 #include "console.h"
 #include "timer.h"
+#if defined(WIN32) || defined(WIN64)
+  #include <ftd2xx.h>
+  #pragma comment(lib, "ftd2xx.lib")
+#endif
 #if defined(__ARMEL__) && defined(USE_WIRING)
   #include <wiringPi.h>       // for reset via GPIO
 #endif // __ARMEL__ && USE_WIRING
 
-STM8gal_SerialErrors_t g_serialCommsLastError = STM8GAL_SERIALCOMMS_NO_ERROR;
+/// For use w/ functions that use the FTDI DLL
+typedef struct STM8gal_SerialCommFTDISettings
+{
+  uint32_t baudrate;
+  uint32_t timeout;
+  uint8_t  numBits;
+  uint8_t  parity;
+  uint8_t  numStop;
+  uint8_t  RTS;
+  uint8_t  DTR;
+} STM8gal_SerialCommFTDISettings_t;
+
+static STM8gal_SerialErrors_t g_serialCommsLastError = STM8GAL_SERIALCOMMS_NO_ERROR;
+static bool g_STM8gal_SerialCommUseFTDIDriver = false;
+static STM8gal_SerialCommFTDISettings_t g_STM8gal_SerialCommUseFTDISettings = {0};
 
 char * g_serialCommsErrorStrings[STM8GAL_SERIALCOMMS_SEND_ERROR+1] = 
 { 
@@ -184,26 +202,36 @@ STM8gal_SerialErrors_t init_port(HANDLE *fpCom, const char *port, uint32_t baudr
 
   g_serialCommsLastError = STM8GAL_SERIALCOMMS_NO_ERROR;
 
-  // required to allow COM ports >COM9
-  sprintf(port_tmp,"\\\\.\\%s", port);
-
-  // create handle to COM-port
-  *fpCom = CreateFile(port_tmp,
-    GENERIC_READ | GENERIC_WRITE,  // both read & write
-    0,    // must be opened with exclusive-access
-    NULL, // no security attributes
-    OPEN_EXISTING, // must use OPEN_EXISTING
-    0,    // not overlapped I/O
-    NULL  // hTemplate must be NULL for comm devices
-  );
-  if (*fpCom == INVALID_HANDLE_VALUE) {
-    console_print(STDOUT, "in 'init_port(%s)': open port failed with code %d", port, (int) SerialComm_GetLastError());
-    g_serialCommsLastError = STM8GAL_SERIALCOMMS_CANNOT_OPEN_PORT;
-    return(g_serialCommsLastError);
+  if ( g_STM8gal_SerialCommUseFTDIDriver == false ) {
+    // required to allow COM ports >COM9
+    sprintf(port_tmp,"\\\\.\\%s", port);
+  
+    // create handle to COM-port
+    *fpCom = CreateFile(port_tmp,
+      GENERIC_READ | GENERIC_WRITE,  // both read & write
+      0,    // must be opened with exclusive-access
+      NULL, // no security attributes
+      OPEN_EXISTING, // must use OPEN_EXISTING
+      0,    // not overlapped I/O
+      NULL  // hTemplate must be NULL for comm devices
+    );
+    if (*fpCom == INVALID_HANDLE_VALUE) {
+      console_print(STDOUT, "in 'init_port(%s)': open port failed with code %d", port, (int) SerialComm_GetLastError());
+      g_serialCommsLastError = STM8GAL_SERIALCOMMS_CANNOT_OPEN_PORT;
+      return(g_serialCommsLastError);
+    }
+  }
+  else {
+    FT_STATUS ftStatus;
+    if (FT_Open(0,&port_tmp) != FT_OK) {
+      console_print(STDOUT, "in 'init_port(%s)': open port failed with code %d", port, (int) SerialComm_GetLastError());
+      g_serialCommsLastError = STM8GAL_SERIALCOMMS_CANNOT_OPEN_PORT;
+      return(g_serialCommsLastError);
+    }
   }
 
   // reset COM port error buffer
-  PurgeComm(*fpCom, PURGE_RXABORT | PURGE_RXCLEAR | PURGE_TXABORT | PURGE_TXCLEAR);
+  flush_port(*fpCom);
 
 #endif // WIN32 || WIN64
 
@@ -251,11 +279,21 @@ STM8gal_SerialErrors_t close_port(HANDLE *fpCom) {
 
   g_serialCommsLastError = STM8GAL_SERIALCOMMS_NO_ERROR;
 
-  if (*fpCom != NULL) {
-    fSuccess = CloseHandle(*fpCom);
-    if (!fSuccess) {
-      console_print(STDOUT, "in 'close_port': close port failed with code %d", (int) SerialComm_GetLastError());
-      g_serialCommsLastError = STM8GAL_SERIALCOMMS_CANNOT_CLOSE_PORT;
+  if ( g_STM8gal_SerialCommUseFTDIDriver == false ) {
+    if (*fpCom != NULL) {
+      fSuccess = CloseHandle(*fpCom);
+      if (!fSuccess) {
+        console_print(STDOUT, "in 'close_port': close port failed with code %d", (int) SerialComm_GetLastError());
+        g_serialCommsLastError = STM8GAL_SERIALCOMMS_CANNOT_CLOSE_PORT;
+      }
+    }
+  }
+  else {
+    if (*fpCom != NULL) {
+      if (FT_Close(0, *fpCom) != FT_OK) {
+        console_print(STDOUT, "in 'close_port': close port failed with code %d", (int) SerialComm_GetLastError());
+        g_serialCommsLastError = STM8GAL_SERIALCOMMS_CANNOT_CLOSE_PORT;
+      }
     }
   }
   *fpCom = NULL;
@@ -359,8 +397,7 @@ STM8gal_SerialErrors_t pulse_DTR(HANDLE fpCom, uint32_t duration) {
 
   generate low pulse on RTS in [ms] to reset STM8.
 */
-STM8gal_SerialErrors_t pulse_RTS(HANDLE fpCom, uint32_t duration)
-{
+STM8gal_SerialErrors_t pulse_RTS(HANDLE fpCom, uint32_t duration) {
 
     g_serialCommsLastError = STM8GAL_SERIALCOMMS_NO_ERROR;
 
@@ -478,37 +515,48 @@ STM8gal_SerialErrors_t get_port_attribute(HANDLE fpCom, uint32_t *baudrate, uint
 
   g_serialCommsLastError = STM8GAL_SERIALCOMMS_NO_ERROR;
 
-  // get the current port configuration
-  fSuccess = GetCommState(fpCom, &fDCB);
-  if (!fSuccess) {
-    g_serialCommsLastError = STM8GAL_SERIALCOMMS_CANNOT_GET_PORT_CONFIG;
-    console_print(STDOUT, "in 'get_port_attribute': GetCommState() failed with code %d", (int) SerialComm_GetLastError());
-    return(g_serialCommsLastError);
+  if ( g_STM8gal_SerialCommUseFTDIDriver == false ) {
+    // get the current port configuration
+    fSuccess = GetCommState(fpCom, &fDCB);
+    if (!fSuccess) {
+      g_serialCommsLastError = STM8GAL_SERIALCOMMS_CANNOT_GET_PORT_CONFIG;
+      console_print(STDOUT, "in 'get_port_attribute': GetCommState() failed with code %d", (int) SerialComm_GetLastError());
+      return(g_serialCommsLastError);
+    }
+  
+    // get port settings
+    *baudrate = fDCB.BaudRate;        // baud rate (19200, 57600, 115200)
+    *numBits  = fDCB.ByteSize;        // number of data bits per byte
+    *parity   = fDCB.Parity;          // bug in Win API, see https://stackoverflow.com/questions/36411498/fparity-member-of-dcb-structure-always-false-after-a-getcommstate
+    *numStop  = fDCB.StopBits;        // number of stop bits
+    if (fDCB.StopBits == ONESTOPBIT)
+      *numStop = 1;                      // 1 stop bit
+    else if (fDCB.StopBits == TWOSTOPBITS)
+      *numStop = 2;                      // 2 stop bits
+    else
+      *numStop = 3;                      // 1.5 stop bits
+    *RTS      = fDCB.fRtsControl;     // RTS off(=0=-12V) or on(=1=+12V)
+    *DTR      = fDCB.fDtrControl;     // DTR off(=0=-12V) or on(=1=+12V)
+  
+    // get port timeout
+    fSuccess = GetCommTimeouts(fpCom, &fTimeout);
+    if (!fSuccess) {
+      g_serialCommsLastError = STM8GAL_SERIALCOMMS_CANNOT_GET_PORT_CONFIG;
+      console_print(STDOUT, "in 'get_port_attribute': GetCommTimeouts() failed with code %d", (int) SerialComm_GetLastError());
+      return(g_serialCommsLastError);
+    }
+    *timeout = fTimeout.ReadTotalTimeoutConstant;       // this parameter fits also for timeout=0
   }
-
-  // get port settings
-  *baudrate = fDCB.BaudRate;        // baud rate (19200, 57600, 115200)
-  *numBits  = fDCB.ByteSize;        // number of data bits per byte
-  *parity   = fDCB.Parity;          // bug in Win API, see https://stackoverflow.com/questions/36411498/fparity-member-of-dcb-structure-always-false-after-a-getcommstate
-  *numStop  = fDCB.StopBits;        // number of stop bits
-  if (fDCB.StopBits == ONESTOPBIT)
-    *numStop = 1;                      // 1 stop bit
-  else if (fDCB.StopBits == TWOSTOPBITS)
-    *numStop = 2;                      // 2 stop bits
-  else
-    *numStop = 3;                      // 1.5 stop bits
-  *RTS      = fDCB.fRtsControl;     // RTS off(=0=-12V) or on(=1=+12V)
-  *DTR      = fDCB.fDtrControl;     // DTR off(=0=-12V) or on(=1=+12V)
-
-  // get port timeout
-  fSuccess = GetCommTimeouts(fpCom, &fTimeout);
-  if (!fSuccess) {
-    g_serialCommsLastError = STM8GAL_SERIALCOMMS_CANNOT_GET_PORT_CONFIG;
-    console_print(STDOUT, "in 'get_port_attribute': GetCommTimeouts() failed with code %d", (int) SerialComm_GetLastError());
-    return(g_serialCommsLastError);
+  else {
+      *baudrate = g_STM8gal_SerialCommUseFTDISettings.baudrate;
+      *numBits = g_STM8gal_SerialCommUseFTDISettings.numBits;
+      *numStop = g_STM8gal_SerialCommUseFTDISettings.numStop;
+      *parity = g_STM8gal_SerialCommUseFTDISettings.parity;
+      *timeout = g_STM8gal_SerialCommUseFTDISettings.timeout;
+      *DTR = g_STM8gal_SerialCommUseFTDISettings.DTR;
+      *RTS = g_STM8gal_SerialCommUseFTDISettings.RTS;
   }
-  *timeout = fTimeout.ReadTotalTimeoutConstant;       // this parameter fits also for timeout=0
-
+  
 #endif // WIN32 || WIN64
 
 
@@ -626,6 +674,7 @@ STM8gal_SerialErrors_t get_port_attribute(HANDLE fpCom, uint32_t *baudrate, uint
 */
 STM8gal_SerialErrors_t set_port_attribute(HANDLE fpCom, uint32_t baudrate, uint32_t timeout, uint8_t numBits, uint8_t parity, uint8_t numStop, uint8_t RTS, uint8_t DTR) {
 
+  // reset COM port error buffer
   g_serialCommsLastError = STM8GAL_SERIALCOMMS_NO_ERROR;
 
 /////////
@@ -637,61 +686,107 @@ STM8gal_SerialErrors_t set_port_attribute(HANDLE fpCom, uint32_t baudrate, uint3
   BOOL          fSuccess;
   COMMTIMEOUTS  fTimeout;
 
-  // reset COM port error buffer
-  PurgeComm(fpCom, PURGE_RXABORT | PURGE_RXCLEAR | PURGE_TXABORT | PURGE_TXCLEAR);
+  if ( g_STM8gal_SerialCommUseFTDIDriver == false ) {
 
-  // get the current port configuration
-  fSuccess = GetCommState(fpCom, &fDCB);
-  if (!fSuccess) {
-    g_serialCommsLastError = STM8GAL_SERIALCOMMS_CANNOT_GET_PORT_CONFIG;
-    console_print(STDOUT, "in 'set_port_attribute()': get port attributes failed with code %d", (int) SerialComm_GetLastError());
-    return(g_serialCommsLastError);
+    flush_port(fpCom);
+
+    // get the current port configuration
+    fSuccess = GetCommState(fpCom, &fDCB);
+    if (!fSuccess) {
+      g_serialCommsLastError = STM8GAL_SERIALCOMMS_CANNOT_GET_PORT_CONFIG;
+      console_print(STDOUT, "in 'set_port_attribute()': get port attributes failed with code %d", (int)GetLastError());
+      return(g_serialCommsLastError);
+    }
+  
+    // change port settings
+    fDCB.BaudRate = baudrate;         // set the baud rate (19200, 57600, 115200)
+    fDCB.ByteSize = numBits;          // number of data bits per byte
+    if (parity) {
+      fDCB.fParity = TRUE;            // Enable parity checking
+      fDCB.Parity  = parity;          // 0-4=no,odd,even,mark,space
+    }
+    else {
+      fDCB.fParity  = FALSE;          // disable parity checking
+      fDCB.Parity   = NOPARITY;       // just to make sure
+    }
+    if (numStop == 1)
+      fDCB.StopBits = ONESTOPBIT;     // one stop bit
+    else if (numStop == 2)
+      fDCB.StopBits = TWOSTOPBITS;    // two stop bit
+    else
+      fDCB.StopBits = ONE5STOPBITS;   // 1.5 stop bit
+    fDCB.fRtsControl = (RTS != 0);    // RTS off(=0=-12V) or on(=1=+12V)
+    fDCB.fDtrControl = (DTR != 0);    // DTR off(=0=-12V) or on(=1=+12V)
+  
+    // set new COM state
+    fSuccess = SetCommState(fpCom, &fDCB);
+    if (!fSuccess) {
+      g_serialCommsLastError = STM8GAL_SERIALCOMMS_CANNOT_SET_PORT_CONFIG;
+      console_print(STDOUT, "in 'set_port_attribute()': set port attributes failed with code %d", (int)GetLastError());
+      return(g_serialCommsLastError);
+    }
+  
+  
+    // set timeouts for port to avoid hanging of program. For simplicity set all timeouts to same value.
+    // For timeout=0 set values to query for buffer content
+    if (timeout == 0)
+      fTimeout.ReadIntervalTimeout        = MAXDWORD;    // --> no read timeout
+    else
+      fTimeout.ReadIntervalTimeout        = 0;           // max. ms between following read bytes (0=not used)
+    fTimeout.ReadTotalTimeoutMultiplier   = 0;           // time per read byte (use contant timeout instead)
+    fTimeout.ReadTotalTimeoutConstant     = timeout;     // total read timeout in ms
+    fTimeout.WriteTotalTimeoutMultiplier  = 0;           // time per write byte (use contant timeout instead)
+    fTimeout.WriteTotalTimeoutConstant    = timeout;
+    fSuccess = SetCommTimeouts(fpCom, &fTimeout);
+    if (!fSuccess) {
+      g_serialCommsLastError = STM8GAL_SERIALCOMMS_CANNOT_SET_PORT_CONFIG;
+      console_print(STDOUT, "in 'set_port_attribute()': set port timeout failed with code %d", (int)GetLastError());
+      return(g_serialCommsLastError);
+    }
   }
-
-  // change port settings
-  fDCB.BaudRate = baudrate;         // set the baud rate (19200, 57600, 115200)
-  fDCB.ByteSize = numBits;          // number of data bits per byte
-  if (parity) {
-    fDCB.fParity = TRUE;            // Enable parity checking
-    fDCB.Parity  = parity;          // 0-4=no,odd,even,mark,space
-  }
-  else {
-    fDCB.fParity  = FALSE;          // disable parity checking
-    fDCB.Parity   = NOPARITY;       // just to make sure
-  }
-  if (numStop == 1)
-    fDCB.StopBits = ONESTOPBIT;     // one stop bit
-  else if (numStop == 2)
-    fDCB.StopBits = TWOSTOPBITS;    // two stop bit
-  else
-    fDCB.StopBits = ONE5STOPBITS;   // 1.5 stop bit
-  fDCB.fRtsControl = (RTS != 0);    // RTS off(=0=-12V) or on(=1=+12V)
-  fDCB.fDtrControl = (DTR != 0);    // DTR off(=0=-12V) or on(=1=+12V)
-
-  // set new COM state
-  fSuccess = SetCommState(fpCom, &fDCB);
-  if (!fSuccess) {
-    g_serialCommsLastError = STM8GAL_SERIALCOMMS_CANNOT_SET_PORT_CONFIG;
-    console_print(STDOUT, "in 'set_port_attribute()': set port attributes failed with code %d", (int) SerialComm_GetLastError());
-    return(g_serialCommsLastError);
-  }
-
-
-  // set timeouts for port to avoid hanging of program. For simplicity set all timeouts to same value.
-  // For timeout=0 set values to query for buffer content
-  if (timeout == 0)
-    fTimeout.ReadIntervalTimeout        = MAXDWORD;    // --> no read timeout
-  else
-    fTimeout.ReadIntervalTimeout        = 0;           // max. ms between following read bytes (0=not used)
-  fTimeout.ReadTotalTimeoutMultiplier   = 0;           // time per read byte (use contant timeout instead)
-  fTimeout.ReadTotalTimeoutConstant     = timeout;     // total read timeout in ms
-  fTimeout.WriteTotalTimeoutMultiplier  = 0;           // time per write byte (use contant timeout instead)
-  fTimeout.WriteTotalTimeoutConstant    = timeout;
-  fSuccess = SetCommTimeouts(fpCom, &fTimeout);
-  if (!fSuccess) {
-    g_serialCommsLastError = STM8GAL_SERIALCOMMS_CANNOT_SET_PORT_CONFIG;
-    console_print(STDOUT, "in 'set_port_attribute()': set port timeout failed with code %d", (int) SerialComm_GetLastError());
-    return(g_serialCommsLastError);
+  else {  /* g_STM8gal_SerialCommUseFTDISettings == true */
+    FT_STATUS ftStatus;
+    g_STM8gal_SerialCommUseFTDISettings.baudrate = baudrate;
+    g_STM8gal_SerialCommUseFTDISettings.numBits = numBits;
+    g_STM8gal_SerialCommUseFTDISettings.numStop = numStop;
+    g_STM8gal_SerialCommUseFTDISettings.parity = parity;
+    g_STM8gal_SerialCommUseFTDISettings.timeout = timeout;
+    g_STM8gal_SerialCommUseFTDISettings.DTR = DTR;
+    g_STM8gal_SerialCommUseFTDISettings.RTS = RTS;
+    ftStatus = FT_SetDataCharacteristics(fpCom, numBits, numStop, parity);
+    if (ftStatus != FT_OK) {
+      g_serialCommsLastError = STM8GAL_SERIALCOMMS_CANNOT_SET_PORT_CONFIG;
+      console_print(STDOUT, "in 'set_port_attribute()': set data characteristics failed with code %d", (int)ftStatus);
+      return(g_serialCommsLastError);
+    }
+    ftStatus = FT_SetTimeouts(fpCom, timeout, timeout);
+    if (ftStatus != FT_OK) {
+      g_serialCommsLastError = STM8GAL_SERIALCOMMS_CANNOT_SET_PORT_CONFIG;
+      console_print(STDOUT, "in 'set_port_attribute()': set port timeout failed with code %d", (int)ftStatus);
+      return(g_serialCommsLastError);
+    }
+    ftStatus = FT_SetBaudRate(fpCom, baudrate);
+    if (ftStatus != FT_OK) {
+      g_serialCommsLastError = STM8GAL_SERIALCOMMS_CANNOT_SET_PORT_CONFIG;
+      console_print(STDOUT, "in 'set_port_attribute()': set port baud rate failed with code %d", (int)ftStatus);
+      return(g_serialCommsLastError);
+    }
+    if (RTS != 0) {
+      ftStatus = FT_SetRts(fpCom);
+      if (ftStatus != FT_OK) {
+        g_serialCommsLastError = STM8GAL_SERIALCOMMS_CANNOT_SET_PORT_CONFIG;
+        console_print(STDOUT, "in 'set_port_attribute()': set rts failed with code %d", (int)ftStatus);
+        return(g_serialCommsLastError);
+      }
+    }
+    if (DTR != 0) {
+      ftStatus = FT_SetDtr(fpCom);
+      if (ftStatus != FT_OK) {
+        g_serialCommsLastError = STM8GAL_SERIALCOMMS_CANNOT_SET_PORT_CONFIG;
+        console_print(STDOUT, "in 'set_port_attribute()': set dts failed with code %d", (int)ftStatus);
+        return(g_serialCommsLastError);
+      }
+    }
   }
 
 #endif // WIN32 || WIN64
@@ -954,8 +1049,13 @@ STM8gal_SerialErrors_t send_port(HANDLE fpCom, uint8_t uartMode, uint32_t lenTx,
 #if defined(WIN32) || defined(WIN64)
 
   // send data & return number of sent bytes
-  PurgeComm(fpCom, PURGE_RXABORT | PURGE_RXCLEAR | PURGE_TXABORT | PURGE_TXCLEAR);
-  WriteFile(fpCom, Tx, lenTx, numChars, NULL);
+  flush_port(fpCom);
+  if ( g_STM8gal_SerialCommUseFTDIDriver == false ) {
+    WriteFile(fpCom, Tx, lenTx, numChars, NULL);
+  }
+  else {
+    FT_Write(fpCom, Tx, lenTx, numChars);
+  }
 
 #endif // WIN32 || WIN64
 
@@ -1024,7 +1124,12 @@ STM8gal_SerialErrors_t receive_port(HANDLE fpCom, uint8_t uartMode, uint32_t len
     // echo each byte as it is received
     *numChars = 0;
     for (i=0; i<lenRx; i++) {
-      ReadFile(fpCom, Rx+i, 1, &numTmp, NULL);
+      if ( g_STM8gal_SerialCommUseFTDIDriver == false ) {
+        ReadFile(fpCom, Rx+i, 1, &numTmp, NULL);
+      }
+      else {
+        FT_Read(fpCom, Rx+i, 1, &numTmp);
+      }
       if (numTmp == 1) {
         *numChars += 1;
         if (send_port(fpCom, uartMode, 1, Rx+i, &numTmp) != STM8GAL_SERIALCOMMS_NO_ERROR)
@@ -1036,10 +1141,14 @@ STM8gal_SerialErrors_t receive_port(HANDLE fpCom, uint8_t uartMode, uint32_t len
 
   } // uartMode==2
 
-
   // UART duplex mode or 1-wire interface -> receive all bytes in single block -> fast
   else {
-    ReadFile(fpCom, Rx, lenRx, numChars, NULL);
+    if ( g_STM8gal_SerialCommUseFTDIDriver == false ) {
+      ReadFile(fpCom, Rx, lenRx, numChars, NULL);
+    }
+    else {
+      FT_Read(fpCom, Rx, lenRx, numChars);
+    }
   }
 
 #endif // WIN32 || WIN64
@@ -1135,7 +1244,12 @@ STM8gal_SerialErrors_t flush_port(HANDLE fpCom) {
 #if defined(WIN32) || defined(WIN64)
 
   // purge all port buffers (see http://msdn.microsoft.com/en-us/library/windows/desktop/aa363428%28v=vs.85%29.aspx)
-  PurgeComm(fpCom, PURGE_RXABORT | PURGE_RXCLEAR | PURGE_TXABORT | PURGE_TXCLEAR);
+  if ( g_STM8gal_SerialCommUseFTDIDriver == false ) {
+    PurgeComm(fpCom, PURGE_RXABORT | PURGE_RXCLEAR | PURGE_TXABORT | PURGE_TXCLEAR);
+  }
+  else {
+    FT_Purge(fpCom, FT_PURGE_RX | FT_PURGE_TX);
+  }
 
 #endif // WIN32 || WIN64
 
@@ -1177,5 +1291,19 @@ const char * SerialComm_GetLastErrorString(void)
 {
     return(g_serialCommsErrorStrings[SerialComm_GetLastError()]);
 }
+
+
+#if defined(WIN32) || defined(WIN64)
+/**
+  \fn void SerialComm_UseFTDIDriver( bool newSetting )
+   
+  Set the Serial Comms module to use the FTDI direct drivers (DLL)
+*/
+void SerialComm_UseFTDIDriver( bool newSetting )
+{
+    g_STM8gal_SerialCommUseFTDIDriver = newSetting;
+}
+#endif
+
 
 // end of file
