@@ -27,6 +27,7 @@
 #endif
 
 STM8gal_BootloaderErrors_t g_bootloaderLastError = STM8GAL_BOOTLOADER_NO_ERROR;
+Bootloader_VerificationInfo_t g_bootloaderLastVerificationError;
 
 char * g_bootloaderErrorStrings[STM8GAL_BOOTLOADER_HEXFILE_ERROR+1] =
 {
@@ -161,7 +162,6 @@ STM8gal_BootloaderErrors_t bsl_sync(HANDLE ptrPort, uint8_t physInterface, uint8
     // avoid flooding the STM8
     SLEEP(10);
 
-  //xxx} while ((count<SYNC_RETRIES) && ((len!=lenRx) || ((Rx[0]!=ACK) && (Rx[0]!=NACK))));
   } while ((count<SYNC_RETRIES) && ((len!=lenRx) || (Rx[0]!=NACK)));
 
   // check if ok (check for NACK, not ACK!)
@@ -169,21 +169,6 @@ STM8gal_BootloaderErrors_t bsl_sync(HANDLE ptrPort, uint8_t physInterface, uint8
     if (verbose >= SILENT)
       console_print(STDOUT, "done (%d attempts)\n", count);
   }
-  /* xxx
-  // check if ok
-  if ((len==lenRx) && (Rx[0]==ACK)) {
-    if (verbose == SILENT)
-      console_print(STDOUT, "done\n");
-    else if (verbose > SILENT)
-      console_print(STDOUT, "done (ACK)\n");
-  }
-  else if ((len==lenRx) && (Rx[0]==NACK)) {
-    if (verbose == SILENT)
-      console_print(STDOUT, "done\n");
-    else if (verbose > SILENT)
-      console_print(STDOUT, "done (NACK)\n");
-  }
-  */
   else if (count >= SYNC_RETRIES) {
     console_print(STDOUT, "too many sync retires");
     g_bootloaderLastError = STM8GAL_BOOTLOADER_TOO_MANY_SYNC_ATTEMPTS;
@@ -1309,16 +1294,6 @@ STM8gal_BootloaderErrors_t bsl_flashSectorErase(HANDLE ptrPort, uint8_t physInte
   Tx[2] = (Tx[0] ^ Tx[1]);
   lenRx = 1;
 
-  // debug: construct pattern for sector N & (N+1)
-  /*
-  lenTx = 4;
-  Tx[0] = 0x01;      // number of sectors to erase -1 (here 2 sectors)
-  Tx[1] = sector;
-  Tx[2] = sector+1;
-  Tx[3] = (Tx[0] ^ Tx[1] ^ Tx[2]);
-  lenRx = 1;
-  */
-
   // measure time for sector erase
   tStart = millis();
 
@@ -2031,6 +2006,8 @@ STM8gal_BootloaderErrors_t bsl_memVerify(HANDLE ptrPort, uint8_t physInterface, 
   uint16_t  *tmpImageBuf;            // RAM image buffer (high byte != 0 indicates value is set)
 
   g_bootloaderLastError = STM8GAL_BOOTLOADER_NO_ERROR;
+  g_bootloaderLastVerificationError.deviceByte = 0;
+  g_bootloaderLastVerificationError.imageByte = 0;
 
   if (!(tmpImageBuf = malloc(LENIMAGEBUF * sizeof(*tmpImageBuf)))) {
     console_print(STDOUT, "Cannot allocate image buffer, try reducing LENIMAGEBUF");
@@ -2067,7 +2044,6 @@ STM8gal_BootloaderErrors_t bsl_memVerify(HANDLE ptrPort, uint8_t physInterface, 
 
   } // loop over image
 
-
   // print messgage
   if (verbose != MUTE)
     console_print(STDOUT, "  verify memory ... ");
@@ -2076,7 +2052,10 @@ STM8gal_BootloaderErrors_t bsl_memVerify(HANDLE ptrPort, uint8_t physInterface, 
   for (addr=addrStart; addr<=addrStop; addr++) {
     if (imageBuf[addr] & 0xFF00) {
       if ((imageBuf[addr] & 0xFF) != (tmpImageBuf[addr] & 0xFF)) {
-        console_print(STDOUT, "verify failed at address 0x%" PRIx64 " (0x%02x vs 0x%02x)", addr, (uint8_t) (imageBuf[addr]&0xFF), (uint8_t) (tmpImageBuf[addr]&0xFF));
+        console_print(STDOUT, "verify failed at address 0x%" PRIx64 " (x%02x vs 0x%02x)", addr, (uint8_t) (imageBuf[addr]&0xFF), (uint8_t) (tmpImageBuf[addr]&0xFF));
+        g_bootloaderLastVerificationError.address = addr;
+        g_bootloaderLastVerificationError.deviceByte = (uint8_t) (tmpImageBuf[addr]&0xFF);
+        g_bootloaderLastVerificationError.imageByte = (uint8_t) (imageBuf[addr]&0xFF);
         g_bootloaderLastError = STM8GAL_BOOTLOADER_VERIFICATION_FAILED;
       }
     } // if data defined
@@ -2299,10 +2278,27 @@ STM8gal_BootloaderErrors_t Bootloader_GetLastError(void) {
 
   return last error string in the Bootloader module
 */
-const char * Bootloader_GetLastErrorString(void)
-{
+const char * Bootloader_GetLastErrorString(void) {
     return(g_bootloaderErrorStrings[Bootloader_GetLastError()]);
 }
 
+/**
+  \fn const char * Bootloader_GetLastVerificationError(void)
+   
+  \return true for a verification error has occurred.  False one has not
+
+  get the last verification error information
+*/
+bool Bootloader_GetLastVerificationError(Bootloader_VerificationInfo_t *verificationError) {
+  
+  bool returnVal = false;
+
+  // if the bytes are the same, then there was no error on the last verification
+  if ( g_bootloaderLastVerificationError.deviceByte != g_bootloaderLastVerificationError.imageByte ) {
+    *verificationError = g_bootloaderLastVerificationError;
+    returnVal = true;
+  }
+  return(returnVal);
+}
 
 // end of file
