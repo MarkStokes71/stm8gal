@@ -16,10 +16,6 @@
 #include "serial_comm.h"
 #include "console.h"
 #include "timer.h"
-#if defined(WIN32) || defined(WIN64)
-  #include <ftd2xx.h>
-  #pragma comment(lib, "ftd2xx.lib")
-#endif
 #if defined(__ARMEL__) && defined(USE_WIRING)
   #include <wiringPi.h>       // for reset via GPIO
 #endif // __ARMEL__ && USE_WIRING
